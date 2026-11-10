@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">FlatOut 2 (ARM64 port)</string>
+    <string name="boot_title">FlatOut 2 — port recompilado ARM64</string>
+    <string name="boot_checking">Verificando arquivos do jogo…</string>
+    <string name="boot_ok">Tudo pronto! Toque em INICIAR.</string>
+    <string name="boot_start">INICIAR</string>
+    <string name="boot_recheck">Verificar de novo</string>
+    <string name="boot_missing_title">Arquivos do jogo não encontrados</string>
+    <string name="boot_missing_body">
+        Copie os arquivos do SEU jogo (GOG / Zoom Platform v2.1.0.9) para:\n\n
+        %s\n\n
+        Arquivos necessários:\n
+        • FlatOut2.exe  (MD5 1f8cae2b47276ca134750ba438aa35ca)\n
+        • d3dx9_30.dll\n
+        • filesystem\n
+        • data.bfs\n
+        • langpack.bfs\n
+        • zoom_platform.bfs (se existir)\n\n
+        Dica: conecte o celular no PC e copie a pasta do jogo inteira para o caminho acima.
+    </string>
+    <string name="boot_wrong_exe">FlatOut2.exe não é a versão suportada.\nO port precisa da versão DRM-free GOG/Zoom (v2.1.0.9).\nMD5 encontrado: %s</string>
+    <string name="boot_binary_missing">fo2.aarch64 não encontrado.\nColoque o binário do port em:\n%s</string>
+    <string name="toggle_controls">Ocultar/mostrar controles de toque</string>
+</resources>

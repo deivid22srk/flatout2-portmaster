@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Stylized car silhouette with speed lines -->
+    <path
+        android:fillColor="#D24A1E"
+        android:pathData="M18,62 C22,54 30,48 40,46 L52,38 C60,33 72,33 80,38 L88,44 C94,46 96,52 94,58 L92,64 C92,67 90,68 88,68 L22,68 C19,68 17,65 18,62 Z M38,50 L50,42 C56,38 66,38 72,42 L78,47 L44,54 Z" />
+    <path
+        android:fillColor="#1A1A1A"
+        android:pathData="M30,68 a7,7 0 1,0 14,0 a7,7 0 1,0 -14,0 Z M66,68 a7,7 0 1,0 14,0 a7,7 0 1,0 -14,0 Z" />
+    <path
+        android:fillColor="#FFB84D"
+        android:pathData="M6,50 L20,50 L18,54 L4,54 Z M2,58 L16,58 L14,62 L0,62 Z" />
+</vector>

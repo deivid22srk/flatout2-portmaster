@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="FO2Theme" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowBackground">#FF101010</item>
+        <item name="colorAccent">#FFD24A1E</item>
+        <item name="colorPrimary">#FFD24A1E</item>
+        <item name="colorPrimaryDark">#FF101010</item>
+    </style>
+</resources>
