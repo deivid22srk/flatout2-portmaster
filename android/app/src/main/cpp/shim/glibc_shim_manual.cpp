@@ -9,6 +9,7 @@
 #include <ctype.h>
 #include <elf.h>
 #include <atomic>
+#include <cinttypes>
 #include <errno.h>
 #include <fcntl.h>
 #include <link.h>
@@ -143,7 +144,10 @@ void* guest_mmap(void* addr, size_t len, int prot, int flags, int fd, off_t off)
         return mmap(addr, len, prot, flags, fd, off);
     }
 
-    static std::atomic<bool> reported{false};
+    // Every creation is logged: testGuestMemory creates and frees one window
+    // before the runtime builds its own, and the once-only "reported" gate hid
+    // the second creation — the exact state we need when commits start failing.
+    static std::atomic<int> creations{0};
     for (int attempt = 0; attempt < 2; ++attempt) {
         // If our own reservation covers the span, drop it first: MAP_FIXED_NOREPLACE
         // fails (EEXIST) even against a PROT_NONE anonymous mapping.
@@ -156,11 +160,13 @@ void* guest_mmap(void* addr, size_t len, int prot, int flags, int fd, off_t off)
         void* p = mmap((void*)(uintptr_t)kFlatBase, len, PROT_NONE,
                        flags | MAP_FIXED_NOREPLACE, fd, off);
         if (p != MAP_FAILED) {
-            if (!reported.exchange(true))
-                logi("flat guest window reserved at 0x1000000000 (4 GiB)");
+            logi("flat guest window #%d reserved at 0x1000000000 (4 GiB)",
+                 creations.fetch_add(1) + 1);
             return p;
         }
-        if (errno != EEXIST) break;
+        int err = errno;
+        loge("flat guest window mmap attempt %d failed: errno %d", attempt + 1, err);
+        if (err != EEXIST) break;
         if (attempt == 0) {
             loge("flat guest window is taken; diagnosing");
             log_overlapping_maps(kFlatBase, kFlatBase + len, "flat window");
@@ -173,10 +179,50 @@ void* guest_mmap(void* addr, size_t len, int prot, int flags, int fd, off_t off)
     // base") instead of failing mysteriously later.
     int err = errno;
     void* p = mmap(addr, len, prot, flags, fd, off);
-    if (!reported.exchange(true))
-        loge("flat guest window unavailable (errno %d); kernel gave %p — the game "
-             "will abort in testGuestMemory unless this is fixed", err, p);
+    loge("flat guest window unavailable (errno %d); kernel gave %p -- the game "
+         "will abort in testGuestMemory unless this is fixed", err, p);
     return p;
+}
+
+// ---- mprotect: GuestMemory::commit turns reserved window pages RW --------------
+//
+// On device (v1.0.0-android.4, motorola edge 30 fusion / Android 14): the main
+// thread's testGuestMemory commits its ranges through this exact path fine, yet
+// ~1 ms later the boot worker's commit throws "Guest commit failed" on the
+// first mprotect of a fresh 4 GiB window. The guest discards errno, so the
+// kernel's answer was invisible. Wrap it: log addr/len/prot + errno + the
+// overlapping /proc/self/maps lines, and for ranges inside the flat guest
+// window fall back to an equivalent munmap-free mmap(MAP_FIXED): commit only
+// turns fresh PROT_NONE reservation pages accessible, and fresh anonymous
+// pages are exactly that. Whatever eats the mapping (a hole nobody mapped, a
+// THP split, a stray driver mapping) is healed — and now visible in the log.
+int guest_mprotect(void* addr, size_t len, int prot) {
+    int rc = mprotect(addr, len, prot);
+    if (rc == 0) return 0;
+
+    int err = errno;
+    const uint64_t start = (uint64_t)(uintptr_t)addr, end = start + (uint64_t)len;
+    loge("guest mprotect(0x%" PRIx64 ", %zu, %d) failed: errno %d (diagnosing)",
+         start, len, prot, err);
+    log_overlapping_maps(start, end, "mprotect fail");
+
+    // Emulate the commit for guest-window pages only (the game's own reservation);
+    // content-bearing mappings elsewhere must keep the real syscall's verdict.
+    constexpr uint64_t kFlatBase = 0x1000000000ull;
+    constexpr uint64_t kFlatSpan = 0x100000000ull;
+    const bool page_aligned = (start & 0xfffull) == 0 && (len & 0xfffull) == 0;
+    if (len && page_aligned && start >= kFlatBase && end <= kFlatBase + kFlatSpan) {
+        void* p = mmap(addr, len, prot, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+        if (p == addr) {
+            static std::atomic<int> remaps{0};
+            if (remaps.fetch_add(1) < 8)
+                logi("guest mprotect fallback: remapped 0x%" PRIx64 "-0x%" PRIx64 " (prot %d)",
+                     start, end, prot);
+            return 0;
+        }
+        loge("guest mprotect remap fallback failed: errno %d", errno);
+    }
+    return rc;
 }
 
 // ---- dl_iterate_phdr: report the guest image so C++ exceptions can unwind ------

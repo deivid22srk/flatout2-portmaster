@@ -126,6 +126,7 @@ void fo2_thunk_mbsnrtowcs();
 void fo2_thunk_mbsrtowcs();
 void fo2_thunk_mbtowc();
 void guest_mmap();
+void guest_mprotect();
 void fo2_thunk_newlocale();
 void fo2_thunk_openat();
 void fo2_thunk_opendir();
@@ -463,7 +464,7 @@ static const ImportEntry kImports[] = {
     {"mkdir", SymKind::DlSym, nullptr},
     {"mmap", SymKind::Manual, (void*)&guest_mmap},
     {"modf", SymKind::DlSym, nullptr},
-    {"mprotect", SymKind::DlSym, nullptr},
+    {"mprotect", SymKind::Manual, (void*)&guest_mprotect},
     {"munmap", SymKind::DlSym, nullptr},
     {"nanosleep", SymKind::DlSym, nullptr},
     {"newlocale", SymKind::Thunk, (void*)&fo2_thunk_newlocale},

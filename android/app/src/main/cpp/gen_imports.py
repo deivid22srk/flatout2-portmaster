@@ -69,6 +69,12 @@ MANUAL = {
     # stdout/stderr and then call _Exit — log it before the process disappears,
     # otherwise Android builds die with no trace in the logcat.
     "_Exit",
+    # mprotect: GuestMemory::commit's mprotect failed on device (v1.0.0-android.4,
+    # Android 14 / SD888) for the boot worker's fresh 4 GiB window while the main
+    # thread's identical call succeeded, with errno invisible to the guest.
+    # guest_mprotect (glibc_shim_manual.cpp) logs errno + overlapping maps and
+    # falls back to an equivalent remap for ranges inside the flat guest window.
+    "mprotect",
 }
 
 # Weak undefined imports: resolve to NULL (same as on glibc consoles).
@@ -87,7 +93,7 @@ PURE = {
     "read", "write", "open", "close", "lseek", "pread", "pwrite", "dup",
     "unlink", "unlinkat", "link", "symlink", "readlink", "mkdir", "rmdir",
     "chdir", "access", "truncate", "fcntl", "fsync", "ftruncate",
-    "mprotect", "munmap", "madvise",
+    "munmap", "madvise",
     "sendfile", "poll", "socket", "connect", "bind", "listen", "accept4",
     "send", "recv", "sendto", "recvfrom", "getsockname", "getpeername",
     "getsockopt", "setsockopt", "shutdown", "inet_ntop",
