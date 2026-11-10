@@ -3,15 +3,15 @@
 
     <!-- No storage permissions needed: game data lives in the app-specific external dir. -->
 
+    <!-- vmSafeMode: interpreted Java only, so the ART JIT code cache is never
+         mapped — on some devices it lands in the low 4 GiB the guest image
+         wants. The Java side is a thin shell; nothing is lost. -->
     <application
         android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
         android:allowBackup="false"
         android:hardwareAccelerated="true"
         android:hasFragileUserData="false"
-        <!-- Interpreted Java only: skips the ART JIT code-cache mapping, which on
-             some devices lands in the low 4 GiB the guest image wants. The Java
-             side is a thin shell, so there is nothing to lose. -->
         android:vmSafeMode="true"
         android:theme="@style/FO2Theme">
 
