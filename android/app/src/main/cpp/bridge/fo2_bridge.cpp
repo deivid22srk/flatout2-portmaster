@@ -25,22 +25,127 @@ jint JNI_OnLoad(JavaVM* vm, void*) {
 
 // ---- crash reporting: the first on-device runs need actionable logs -------------
 
+namespace {
+
+struct CrashModule {
+    uint64_t start, end, offset;   // exec mapping: [start,end) file offset `offset`
+    char name[96];
+};
+
+constexpr int kMaxCrashModules = 160;
+CrashModule g_crash_modules[kMaxCrashModules];
+int g_crash_module_count = 0;
+
+// Snapshots the executable mappings of this process. Called from a normal
+// thread when handlers are installed, and re-called from the crash handler
+// when a pc is not yet covered (e.g. the guest image mapped after install).
+void snapshot_crash_modules() {
+    FILE* f = fopen("/proc/self/maps", "re");
+    if (f == nullptr) return;
+    int n = 0;
+    char line[512];
+    while (fgets(line, sizeof(line), f) != nullptr && n < kMaxCrashModules) {
+        uint64_t s = 0, e = 0;
+        char perms[8] = {0};
+        unsigned long long off = 0;
+        unsigned int devmaj = 0, devmin = 0;
+        unsigned long long ino = 0;
+        int consumed = 0;
+        if (sscanf(line, "%lx-%lx %7s %llx %x:%x %llx %n",
+                   &s, &e, perms, &off, &devmaj, &devmin, &ino, &consumed) < 7) continue;
+        if (perms[2] != 'x') continue;                       // keep executable ranges
+        const char* p = line + consumed;
+        while (*p == ' ' || *p == '\t') ++p;
+        char* nl = strchr(line, '\n');
+        if (nl != nullptr) *nl = '\0';
+        if (*p == '\0') continue;                            // skip anonymous code (JIT)
+        CrashModule& m = g_crash_modules[n];
+        m.start = s; m.end = e; m.offset = off;
+        strncpy(m.name, p, sizeof(m.name) - 1);
+        m.name[sizeof(m.name) - 1] = '\0';
+        ++n;
+    }
+    fclose(f);
+    g_crash_module_count = n;
+}
+
+// "name+rel (file_off abs)" for a code address, or nullptr when not resolved.
+const char* describe_crash_pc(uint64_t pc, uint64_t* rel_out, bool refresh) {
+    for (int i = 0; i < g_crash_module_count; ++i) {
+        const CrashModule& m = g_crash_modules[i];
+        if (pc >= m.start && pc < m.end) {
+            uint64_t rel = pc - m.start + m.offset;
+            static char buf[160];
+            snprintf(buf, sizeof(buf), "%s+0x%llx", m.name, (unsigned long long)rel);
+            if (rel_out) *rel_out = rel;
+            return buf;
+        }
+    }
+    if (refresh) {
+        snapshot_crash_modules();
+        return describe_crash_pc(pc, rel_out, false);
+    }
+    if (rel_out) *rel_out = 0;
+    return nullptr;
+}
+
+bool is_code_addr(uint64_t v) {
+    for (int i = 0; i < g_crash_module_count; ++i)
+        if (v >= g_crash_modules[i].start && v < g_crash_modules[i].end) return true;
+    return false;
+}
+
+} // namespace
+
 static void crash_handler(int sig, siginfo_t* info, void* ctx) {
     // May run on a guest thread (TPIDR = guest TCB): swap before bionic calls.
     BionicGuard g;
-    uint64_t pc = 0;
+    uint64_t pc = 0, lr = 0, sp = 0;
     if (ctx != nullptr) {
         ucontext_t* uc = (ucontext_t*)ctx;
         pc = uc->uc_mcontext.pc;
+        lr = uc->uc_mcontext.regs[30];
+        sp = uc->uc_mcontext.sp;
     }
+
+    // Resolve against the snapshot; a guest-image pc needs a fresh snapshot.
+    const char* where = describe_crash_pc(pc, nullptr, false);
+    if (where == nullptr) where = describe_crash_pc(pc, nullptr, true);
+
     __android_log_print(ANDROID_LOG_ERROR, "FO2",
-                        "CRASH signal=%d addr=%p pc=0x%llx%s", sig, info ? info->si_addr : nullptr,
-                        (unsigned long long)pc, " (see full logcat)");
+                        "CRASH signal=%d addr=%p pc=0x%llx (%s)", sig,
+                        info ? info->si_addr : nullptr, (unsigned long long)pc,
+                        where ? where : "unknown module");
+
+    // Cheap unwinder: LR plus code pointers found on the stack below sp.
+    char line[256];
+    const char* d = describe_crash_pc(lr, nullptr, false);
+    if (d != nullptr) {
+        snprintf(line, sizeof(line), "CRASH bt: lr=0x%llx %s",
+                 (unsigned long long)lr, d);
+        __android_log_print(ANDROID_LOG_ERROR, "FO2", "%s", line);
+    }
+    if (sp != 0) {
+        int shown = 0;
+        for (uint64_t a = sp; a + 8 <= sp + 0x8000 && shown < 12; a += 8) {
+            uint64_t v;
+            memcpy(&v, (const void*)(uintptr_t)a, sizeof(v));  // crash path: best effort
+            if ((v & 3) != 0 || !is_code_addr(v)) continue;
+            d = describe_crash_pc(v, nullptr, false);
+            if (d == nullptr) continue;
+            snprintf(line, sizeof(line), "CRASH bt: [%llx] %llx %s",
+                     (unsigned long long)a, (unsigned long long)v, d);
+            __android_log_print(ANDROID_LOG_ERROR, "FO2", "%s", line);
+            ++shown;
+        }
+    }
+
     signal(sig, SIG_DFL);
     raise(sig);
 }
 
 static void install_crash_handlers() {
+    snapshot_crash_modules();
     struct sigaction sa{};
     sa.sa_sigaction = crash_handler;
     sa.sa_flags = SA_SIGINFO;
