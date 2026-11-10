@@ -7,10 +7,32 @@
 //   * one PT_TLS segment
 // So a manual loader only has to: map PT_LOADs at fixed vaddrs, copy file
 // contents, resolve every GOT slot against our shim registry, and hand over.
+//
+// The link-time base is NOT guaranteed free on real devices: zygote-inherited
+// reservations (ART heap spaces, JIT code cache, linker gap mappings, vendor
+// blobs) differ per device and can cover parts of the low 4 GiB. Loading
+// therefore tries, in order:
+//   1. the link-time address (MAP_FIXED_NOREPLACE);
+//   2. the link-time address after dropping overlapping *pure gap* mappings
+//      (anonymous, unnamed, PROT_NONE — unused reservations, safe to unmap);
+//   3. the lowest free 64 KiB-aligned hole below 2 GiB, then below 4 GiB.
+//      The image is slid by a delta and every 8-byte word of the file image
+//      that points into the old span is rebased: that covers .dynamic d_ptr
+//      values, the RELA r_offsets, init/fini arrays, phdr/ELF-header vaddrs,
+//      .eh_frame absolute FDE pointers and all data function-pointer tables.
+//      Verified against the actual binary (see scripts/analyze_fo2elf.py):
+//      no absolute 32-bit jump tables (AArch64/clang emits PC-relative ones),
+//      so an 8-byte rebase pass is sound. glibc's __libc_setup_tls and the
+//      unwinder read the rebased phdrs/.eh_frame and keep working.
+//   4. a kernel-chosen address as the last resort (logged loudly).
+// Every failed attempt dumps the overlapping /proc/self/maps entries so a
+// device-specific log pinpoints the culprit immediately.
 #include "elf_loader.h"
 #include "shim_common.h"
 #include "../shim/auto_imports.h"
 
+#include <cerrno>
+#include <cinttypes>
 #include <fcntl.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -18,20 +40,119 @@
 #include <unistd.h>
 #include <elf.h>
 #include <dlfcn.h>
+#include <algorithm>
+#include <string>
 #include <vector>
 
 namespace fo2 {
 
 namespace {
 
-bool map_fixed(uint64_t vaddr, size_t len, int prot) {
+// One line of /proc/self/maps.
+struct MapsEntry {
+    uint64_t start = 0, end = 0;
+    std::string perms;   // e.g. "rw-p" or "---p"
+    std::string path;    // may be empty (plain anonymous)
+    unsigned long long inode = 0;
+};
+
+bool read_maps(std::vector<MapsEntry>* out) {
+    FILE* f = fopen("/proc/self/maps", "re");
+    if (f == nullptr) return false;
+    char line[1024];
+    while (fgets(line, sizeof(line), f) != nullptr) {
+        uint64_t s = 0, e = 0;
+        char perms[8] = {0};
+        unsigned long long off = 0, ino = 0;
+        unsigned int devmaj = 0, devmin = 0;
+        int consumed = 0;
+        if (sscanf(line, "%" SCNx64 "-%" SCNx64 " %7s %llx %x:%x %llu %n",
+                   &s, &e, perms, &off, &devmaj, &devmin, &ino, &consumed) < 7) {
+            continue;
+        }
+        MapsEntry m;
+        m.start = s;
+        m.end = e;
+        m.perms = perms;
+        m.inode = ino;
+        const char* p = line + consumed;
+        while (*p == ' ' || *p == '\t') ++p;
+        char* nl = strchr(line, '\n');   // strip the trailing newline, if any
+        if (nl != nullptr) *nl = '\0';
+        m.path = p;
+        out->push_back(std::move(m));
+    }
+    fclose(f);
+    return !out->empty();
+}
+
+void log_overlapping(uint64_t start, uint64_t end) {
+    std::vector<MapsEntry> maps;
+    if (!read_maps(&maps)) {
+        loge("cannot read /proc/self/maps to diagnose the clash");
+        return;
+    }
+    int shown = 0;
+    for (const auto& m : maps) {
+        if (m.start < end && start < m.end) {
+            loge("overlap: 0x%" PRIx64 "-0x%" PRIx64 " %s inode=%llu %s",
+                 m.start, m.end, m.perms.c_str(), m.inode,
+                 m.path.empty() ? "(anonymous)" : m.path.c_str());
+            if (++shown >= 8) {
+                loge("overlap: ... more suppressed");
+                break;
+            }
+        }
+    }
+}
+
+// True when an overlapping mapping is an unused gap reservation: anonymous,
+// unnamed and with no access rights at all. Dropping those cannot break the
+// runtime — they exist only to reserve address space.
+bool is_pure_gap(const MapsEntry& m) {
+    return m.perms == "---p" && m.inode == 0 && m.path.empty();
+}
+
+bool map_at(uint64_t vaddr, size_t len, int prot) {
     void* p = mmap((void*)(uintptr_t)vaddr, len, prot,
                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
     if (p == MAP_FAILED) {
-        loge("mmap(0x%llx, %zu) failed", (unsigned long long)vaddr, len);
+        loge("mmap(0x%" PRIx64 ", %zu) failed: %s (errno %d)",
+             vaddr, len, strerror(errno), errno);
         return false;
     }
     return true;
+}
+
+// Lowest 64 KiB-aligned hole of at least `span` bytes inside [lo, hi), from
+// the snapshot in `maps`. Returns 0 when nothing fits.
+uint64_t find_free_hole(const std::vector<MapsEntry>& maps, uint64_t span,
+                        uint64_t lo, uint64_t hi) {
+    if (hi <= lo || hi - lo < span) return 0;
+    std::vector<std::pair<uint64_t, uint64_t>> used;
+    for (const auto& m : maps) {
+        uint64_t s = std::max(m.start, lo), e = std::min(m.end, hi);
+        if (s < e) used.emplace_back(s, e);
+    }
+    std::sort(used.begin(), used.end());
+    std::vector<std::pair<uint64_t, uint64_t>> merged;
+    for (const auto& r : used) {
+        if (!merged.empty() && r.first <= merged.back().second) {
+            merged.back().second = std::max(merged.back().second, r.second);
+        } else {
+            merged.push_back(r);
+        }
+    }
+    constexpr uint64_t kAlign = 0x10000;  // p_align of the guest segments
+    uint64_t prev = lo;
+    for (const auto& r : merged) {
+        uint64_t cand = (prev + kAlign - 1) & ~(kAlign - 1);
+        if (r.first > cand && r.first - cand >= span) return cand;
+        prev = std::max(prev, r.second);
+    }
+    uint64_t cand = (prev + kAlign - 1) & ~(kAlign - 1);
+    if (cand <= hi - span) return cand;
+    return 0;
 }
 
 } // namespace
@@ -86,21 +207,81 @@ bool elf_load(const char* path, GuestImage& img) {
 
     const long page = sysconf(_SC_PAGESIZE);
     const uint64_t span_start = min_va & ~(uint64_t)(page - 1);
-    const uint64_t span_end = (max_va + page - 1) & ~(uint64_t)(page - 1);
+    const uint64_t span_len = ((max_va + page - 1) & ~(uint64_t)(page - 1)) - span_start;
 
-    // Reserve the whole image span at the fixed address. MAP_FIXED_NOREPLACE
-    // gives a clean error if something already lives there.
-    if (!map_fixed(span_start, span_end - span_start, PROT_READ | PROT_WRITE)) {
-        loge("guest image span 0x%llx-0x%llx is not free on this device",
-             (unsigned long long)span_start, (unsigned long long)span_end);
-        close(fd);
-        return false;
+    // ---- acquire the address range ----------------------------------------
+    // delta is how far every guest vaddr moved from its link-time value.
+    uint64_t delta = 0;
+    if (map_at(span_start, span_len, PROT_READ | PROT_WRITE)) {
+        logi("guest image at link-time base 0x%" PRIx64, span_start);
+    } else {
+        loge("link-time span 0x%" PRIx64 "-0x%" PRIx64 " is taken; diagnosing",
+             span_start, span_start + span_len);
+        log_overlapping(span_start, span_start + span_len);
+
+        // 2nd try: drop pure PROT_NONE gap reservations and retry in place.
+        std::vector<MapsEntry> maps;
+        bool reclaimed = false;
+        if (read_maps(&maps)) {
+            bool all_gaps = true;
+            std::vector<std::pair<uint64_t, uint64_t>> drops;
+            for (const auto& m : maps) {
+                if (m.start < span_start + span_len && span_start < m.end) {
+                    if (is_pure_gap(m)) {
+                        drops.emplace_back(std::max(m.start, span_start),
+                                           std::min(m.end, span_start + span_len));
+                    } else {
+                        all_gaps = false;
+                        break;
+                    }
+                }
+            }
+            if (all_gaps && !drops.empty()) {
+                for (const auto& d : drops) {
+                    if (munmap((void*)(uintptr_t)d.first, d.second - d.first) == 0) {
+                        logi("dropped PROT_NONE gap 0x%" PRIx64 "-0x%" PRIx64,
+                             d.first, d.second);
+                        reclaimed = true;
+                    }
+                }
+            }
+        }
+        if (reclaimed && map_at(span_start, span_len, PROT_READ | PROT_WRITE)) {
+            logi("guest image at link-time base after gap reclaim 0x%" PRIx64, span_start);
+        } else {
+            // 3rd try: slide the image into the lowest free hole we can find.
+            std::vector<MapsEntry> fresh;
+            uint64_t cand = 0;
+            if (read_maps(&fresh)) {
+                cand = find_free_hole(fresh, span_len, 0x1000000, 0x80000000ull);
+                if (cand == 0) cand = find_free_hole(fresh, span_len, 0x80000000ull, 0x100000000ull);
+            }
+            bool mapped = false;
+            if (cand != 0) {
+                mapped = map_at(cand, span_len, PROT_READ | PROT_WRITE);
+            }
+            if (!mapped) {
+                // 4th try: let the kernel pick (any address, logged loudly).
+                void* p = mmap(nullptr, span_len, PROT_READ | PROT_WRITE,
+                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                if (p == MAP_FAILED) {
+                    loge("guest image mapping failed everywhere (%zu bytes)", span_len);
+                    close(fd);
+                    return false;
+                }
+                cand = (uint64_t)(uintptr_t)p;
+                loge("last resort: guest image at kernel-chosen 0x%" PRIx64, cand);
+            } else {
+                logi("guest image slid to 0x%" PRIx64, cand);
+            }
+            delta = cand - span_start;
+        }
     }
 
-    // Copy PT_LOAD file data into the mapping.
+    // Copy PT_LOAD file data into the mapping (slid).
     for (const auto& ph : phdrs) {
         if (ph.p_type != PT_LOAD || ph.p_filesz == 0) continue;
-        uint8_t* dst = (uint8_t*)(uintptr_t)ph.p_vaddr;
+        uint8_t* dst = (uint8_t*)(uintptr_t)(ph.p_vaddr + delta);
         off_t done = 0;
         while (done < (off_t)ph.p_filesz) {
             ssize_t n = pread(fd, dst + done, ph.p_filesz - done, ph.p_offset + done);
@@ -114,11 +295,36 @@ bool elf_load(const char* path, GuestImage& img) {
         // memsz > filesz part (.bss) is already zero from the anonymous mapping.
     }
 
-    // Apply the GOT relocations.
+    // Rebase pass: when the image slid, every 8-byte word of the file image
+    // that holds an absolute value inside the old span is an internal pointer
+    // (dynamic entries, RELA r_offsets, init/fini arrays, phdr vaddrs, FDE
+    // addresses, function tables). Move them along. Values below the span are
+    // x86 guest addresses / sizes and stay untouched; nothing in this binary
+    // uses absolute 32-bit code pointers (clang emits PC-relative jump tables).
+    size_t fixed = 0;
+    if (delta != 0) {
+        for (const auto& ph : phdrs) {
+            if (ph.p_type != PT_LOAD || ph.p_filesz == 0) continue;
+            uint64_t* w = (uint64_t*)(uintptr_t)(ph.p_vaddr + delta);
+            const size_t words = ph.p_filesz / sizeof(uint64_t);
+            for (size_t i = 0; i < words; ++i) {
+                if (w[i] >= min_va && w[i] < max_va) {
+                    w[i] += delta;
+                    ++fixed;
+                }
+            }
+        }
+        logi("rebased %" PRIu64 " internal pointers by +0x%" PRIx64 " (image 0x%" PRIx64
+             " -> 0x%" PRIx64 ")", (uint64_t)fixed, delta, min_va, min_va + delta);
+    }
+
+    // Apply the GOT relocations. The dynamic table was read from the mapped
+    // image, so with a slide its d_ptr values (and the RELA r_offsets) are
+    // already rebased by the pass above.
     bool ok = true;
     for (const auto& ph : phdrs) {
         if (ph.p_type != PT_DYNAMIC) continue;
-        const Elf64_Dyn* dyns = (const Elf64_Dyn*)(uintptr_t)ph.p_vaddr;
+        const Elf64_Dyn* dyns = (const Elf64_Dyn*)(uintptr_t)(ph.p_vaddr + delta);
         const size_t ndyn = ph.p_filesz / sizeof(Elf64_Dyn);
         const Elf64_Rela* rela = nullptr;
         size_t relasz = 0;
@@ -179,10 +385,10 @@ bool elf_load(const char* path, GuestImage& img) {
         if (ph.p_flags & PF_R) prot |= PROT_READ;
         if (ph.p_flags & PF_W) prot |= PROT_WRITE;
         if (ph.p_flags & PF_X) prot |= PROT_EXEC;
-        uint64_t s = ph.p_vaddr & ~(uint64_t)(page - 1);
-        uint64_t e = (ph.p_vaddr + ph.p_memsz + page - 1) & ~(uint64_t)(page - 1);
+        uint64_t s = (ph.p_vaddr + delta) & ~(uint64_t)(page - 1);
+        uint64_t e = (ph.p_vaddr + delta + ph.p_memsz + page - 1) & ~(uint64_t)(page - 1);
         if (mprotect((void*)(uintptr_t)s, e - s, prot) != 0) {
-            loge("mprotect failed for segment 0x%llx", (unsigned long long)s);
+            loge("mprotect failed for segment 0x%" PRIx64, s);
             ok = false;
         }
     }
@@ -207,22 +413,23 @@ bool elf_load(const char* path, GuestImage& img) {
         }
     }
 
-    img.entry = ehdr.e_entry;
-    img.base_vaddr = min_va;
-    img.end_vaddr = max_va;
+    img.entry = ehdr.e_entry + delta;
+    img.base_vaddr = min_va + delta;
+    img.end_vaddr = max_va + delta;
+    img.slide_delta = delta;
     for (const auto& ph : phdrs) {
-        if (ph.p_type == PT_PHDR) { img.phdr_vaddr = ph.p_vaddr; img.phnum = ph.p_filesz / sizeof(Elf64_Phdr); }
+        if (ph.p_type == PT_PHDR) { img.phdr_vaddr = ph.p_vaddr + delta; img.phnum = ph.p_filesz / sizeof(Elf64_Phdr); }
     }
     if (!img.phdr_vaddr) {  // fall back: phdrs live inside the first PT_LOAD file image
-        img.phdr_vaddr = min_va + ehdr.e_phoff;
+        img.phdr_vaddr = min_va + delta + ehdr.e_phoff;
         img.phnum = ehdr.e_phnum;
     }
 
     close(fd);
     if (ok) {
-        logi("guest image mapped: 0x%llx-0x%llx entry 0x%llx tls %zu",
-             (unsigned long long)img.base_vaddr, (unsigned long long)img.end_vaddr,
-             (unsigned long long)img.entry, img.tls_memsz);
+        logi("guest image mapped: 0x%" PRIx64 "-0x%" PRIx64 " entry 0x%" PRIx64
+             " tls %zu (link base 0x%" PRIx64 ", delta 0x%" PRIx64 ")",
+             img.base_vaddr, img.end_vaddr, img.entry, img.tls_memsz, min_va, delta);
     }
     return ok;
 }

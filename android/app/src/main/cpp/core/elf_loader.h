@@ -7,11 +7,13 @@
 namespace fo2 {
 
 struct GuestImage {
-    uint64_t entry = 0;          // e_entry
+    uint64_t entry = 0;          // e_entry (+ slide delta)
     uint64_t phdr_vaddr = 0;     // mapped program headers (for AT_PHDR)
     uint64_t phnum = 0;
-    uint64_t base_vaddr = 0;     // first PT_LOAD p_vaddr (0x1000000)
+    uint64_t base_vaddr = 0;     // first PT_LOAD p_vaddr as mapped (0x1000000 + delta)
     uint64_t end_vaddr = 0;
+    uint64_t slide_delta = 0;    // how far the image moved from the link-time base
+                                 // (0 = loaded at 0x1000000; > 0 = slid to a free hole)
 
     // TLS segment initial image (PT_TLS), already zero-extended to memsz.
     uint8_t* tls_image = nullptr;
