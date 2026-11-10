@@ -18,7 +18,7 @@ gamedata/
 android/.gradle/
 android/build/
 android/app/build/
-android/.cxx/
+**/.cxx/
 android/local.properties
 # The guest binary is fetched at build time (CI) or placed manually by the user:
 android/app/src/main/assets/fo2/fo2.aarch64
