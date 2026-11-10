@@ -117,12 +117,22 @@ thread própria → SDL shim renderiza na Surface e injeta eventos.
 
 ## 6. Riscos e limitações conhecidas do port Android
 
-- **Não validado em hardware real** durante a geração deste fork (sem aparelho/emulador no
-  ambiente de build): o carregador e os shims foram escritos contra a superfície real do
-  binário (readelf acima) e compilam no CI, mas a primeira execução em aparelho pode exigir
-  ajustes (log de diagnóstico integrado via `adb logcat -s FO2`).
-- Mapeamento do hóspede em 0x1000000: se algum driver mapear essa região, o loader reporta
-  erro claro no log.
+- **Primeiro aparelho real (Motorola edge 30 fusion, Android 14 / SDK 34)** confirmou o
+  risco do item abaixo: `mmap(0x1000000, 107520000)` falhou — a faixa `0x1000000-0x768a000`
+  já estava ocupada por reservas herdadas do zygote/ART (específicas de fabricante/OS).
+  **Correção (v1.0.0-android.2):** o carregador agora tenta (1) a base original,
+  (2) desfazer *gaps* PROT_NONE anônimos que a sobreponham e retestar, (3) deslizar a
+  imagem para o menor buraco livre 64 KiB alinhado (< 2 GiB, depois < 4 GiB) rebasing
+  +delta em todos os ponteiros absolutos internos de 8 bytes — verificação estática do
+  binário (`scripts/analyze_fo2elf.py`, fora do repo): 28.794 ponteiros internos, todos
+  em `.data`/`.rel.ro`/phdrs/`.eh_frame`; `.text` não contém endereços absolutos (só
+  ADRP/PC-relativo) e não há jump tables absolutas de 32 bits, então o rebase de 8 bytes
+  é completo. Falhas registram os mapeamentos sobrepostos (`/proc/self/maps`) no logcat.
+  O app usa `vmSafeMode` (JIT do ART desligado), removendo o cache JIT como possível
+  ocupante de baixa memória.
+- Mapeamento do hóspede em 0x1000000: pode falhar por reservas do zygote/ART que variam
+  por fabricante — tratado pelo carregador (ver item acima); falhas restantes produzem
+  log claro (`overlap: ...`) apontando o mapeamento culpado.
 - FMVs: desligados por padrão (sem FFmpeg no APK). Pode ser habilitado depois com libs FFmpeg
   bionic carregadas via shim `dlopen` (nomes `.so.NN` mapeados).
 - LAN/multiplayer: já não funciona no upstream; segue igual.

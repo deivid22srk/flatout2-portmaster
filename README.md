@@ -45,13 +45,36 @@ acionamento manual e publica como artifact `flatout2-android-apk`.
 
 ### O que ainda não funciona / limitações
 
-- ⚠️ **Não validado em aparelho real ainda** (sem dispositivo no ambiente de build):
-  loader e shims compilam no CI e foram escritos contra a superfície real do binário,
-  mas a primeira execução em hardware pode exigir ajustes — rode com
-  `adb logcat -s FO2` e reporte o log.
+- Primeira execução em aparelho real (Motorola edge 30 fusion, Android 14) encontrou
+  e corrigiu um problema: a **base fixa de carregamento do guest** (`0x1000000`) pode
+  estar ocupada por reservas herdadas do zygote/ART, que variam por fabricante —
+  veja "Solução de problemas" abaixo. O carregador agora se adapta sozinho; a
+  validação em hardware continua em curso — rode com `adb logcat -s FO2` e reporte o log.
 - FMVs desligados (FFmpeg não é embutido; os arquivos de vídeo são ignorados).
 - LAN/multiplayer: já não funciona no upstream; segue igual.
 - Sem suporte a armeabi-v7a (o binário é arm64 only).
+
+### Solução de problemas
+
+**"Falha ao iniciar o hóspede" / `mmap(...) failed` no logcat.** O `fo2.aarch64` é
+um executável não-PIE linkado em `0x1000000`. Nem todo aparelho deixa esse trecho
+livre. O carregador tenta, nesta ordem (registrada no logcat com a tag `FO2`):
+
+1. **Base original** `0x1000000` (`MAP_FIXED_NOREPLACE`);
+2. **Recuperar a base**: se os mapeamentos que a ocupam forem *gaps* PROT_NONE
+   anônimos (reservas sem uso do linker/zygote), eles são desfeitos e a base
+   original é tentada de novo;
+3. **Deslizar a imagem** para o menor buraco livre de 64 KiB alinhado abaixo de
+   2 GiB (depois 4 GiB), rebasing +delta em todos os ponteiros absolutos internos
+   de 8 bytes (tabelas de funções, `.dynamic`, `init_array`, phdrs, FDEs do
+   `.eh_frame`) — verificado estaticamente: o código do guest só endereça a si
+   mesmo via ADRP (PC-relativo), e não há jump tables absolutas de 32 bits;
+4. Último recurso: endereço escolhido pelo kernel.
+
+Cada falha registra os mapeamentos sobrepostos de `/proc/self/maps` — se algo ainda
+falhar no seu aparelho, o trecho `overlap:` do log diz exatamente quem ocupa a
+região. O app também roda com `vmSafeMode` (sem JIT do ART), o que elimina o
+mapeamento do cache JIT como ocupante de baixa memória.
 
 ### Análise técnica
 
