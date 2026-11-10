@@ -1,10 +1,67 @@
 ![FlatOut 2](images/flatout2-banner.jpg)
 
-# FlatOut 2 for ARM64 handhelds
+# FlatOut 2 for ARM64 handhelds — + Android port
 
 FlatOut 2 (PC) statically recompiled to native ARM64 Linux, as a PortMaster-style port. You provide the game files, the port does the rest: nothing to compile.
 
 **Transparency:** this port was developed entirely with Claude, Anthropic's AI, which wrote the code. My own part was testing it on real consoles, analysing the results and proposing improvements.
+
+---
+
+## 🤖 Port Android (neste fork)
+
+Este fork adiciona um **app Android** (`android/`) que carrega o **mesmo binário ARM64 recompilado** (`fo2.aarch64`) dentro do processo do app: um carregador ELF próprio mapeia o executável glibc em memória e uma camada de *shims* (glibc→bionic, SDL2→ANativeWindow/EGL/OpenSL, GLES2→libGLESv2 do sistema) satisfaz as 373 importações dele — sem `exec()`, sem glibc externa, sem X11.
+
+### Como compilar
+
+```bash
+git clone https://github.com/deivid22srk/flatout2-portmaster.git
+cd flatout2-portmaster/android
+./gradlew assembleDebug        # requer JDK 17, Android SDK 34 + NDK r26.3
+```
+
+O binário `fo2.aarch64` **não está no repositório**: o APK o embute a partir da release
+pública do upstream (o CI baixa automaticamente), ou você o coloca manualmente em
+`android/app/src/main/assets/fo2/fo2.aarch64` antes de compilar.
+
+**CI:** `.github/workflows/build.yml` gera os APKs (debug + release) a cada push/PR/
+acionamento manual e publica como artifact `flatout2-android-apk`.
+
+### Como instalar
+
+1. Instale o APK (sideload — `minSdk 26`, alvo `arm64-v8a`).
+2. Copie os arquivos **do seu jogo** (GOG/Zoom v2.1.0.9) para:
+   `Android/data/com.deivid22srk.flatout2/files/gamedata/`
+   (`FlatOut2.exe`, `d3dx9_30.dll`, `filesystem`, `data.bfs`, `langpack.bfs`).
+3. Abra o app: a tela inicial valida os arquivos (inclusive o MD5 do exe) e mostra
+   instruções se algo faltar.
+
+### Controles
+
+- **Gamepad físico** — mapeado direto para SDL GameController (botões e analógicos).
+- **Toque** — volante na esquerda, acelerar/freio/freio de mão/nitro na direita,
+  reset/câmera/pausa/marchas no topo. Botão ☰ oculta/mostra.
+- Tela cheia imersiva, orientação paisagem.
+
+### O que ainda não funciona / limitações
+
+- ⚠️ **Não validado em aparelho real ainda** (sem dispositivo no ambiente de build):
+  loader e shims compilam no CI e foram escritos contra a superfície real do binário,
+  mas a primeira execução em hardware pode exigir ajustes — rode com
+  `adb logcat -s FO2` e reporte o log.
+- FMVs desligados (FFmpeg não é embutido; os arquivos de vídeo são ignorados).
+- LAN/multiplayer: já não funciona no upstream; segue igual.
+- Sem suporte a armeabi-v7a (o binário é arm64 only).
+
+### Análise técnica
+
+O documento [`docs/ANALISE.md`](docs/ANALISE.md) descreve a arquitetura do port,
+o levantamento completo das importações do binário (readelf), as decisões de projeto
+e os riscos conhecidos do port Android.
+
+---
+
+## Port original para handhelds (upstream, `badcats72`)
 
 <!-- SCREENSHOTS: one per console, same place in the game, FPS counter visible -->
 
