@@ -33,6 +33,7 @@ using fo2::loge;
 using fo2::log_overlapping_maps;
 using fo2::drop_pure_gap_maps;
 using fo2::tp_get;
+using fo2::tp_set;
 
 extern "C" {
 
@@ -153,6 +154,64 @@ void* guest_mmap(void* addr, size_t len, int prot, int flags, int fd, off_t off)
         loge("flat guest window unavailable (errno %d); kernel gave %p — the game "
              "will abort in testGuestMemory unless this is fixed", err, p);
     return p;
+}
+
+// ---- dl_iterate_phdr: report the guest image so C++ exceptions can unwind ------
+//
+// The guest carries a STATIC libc++abi/libunwind; its unwinder locates FDEs
+// through dl_iterate_phdr. On Linux the main executable (this guest) is always
+// in that list; on Android bionic knows nothing about the image we mapped
+// in-process, so the first `throw` in guest code would fail to unwind and end
+// in std::terminate/abort. We report the guest image first (dlpi_addr = slide
+// delta, link-time phdrs: dlpi_addr + p_vaddr = the real mapped address), then
+// the host's own modules.
+namespace {
+
+struct PhdrBridge {
+    int (*fn)(struct dl_phdr_info*, size_t, void*);
+    void* data;
+    void* guest_tp;    // this thread's guest TCB
+    void* bionic_tp;   // this thread's real bionic TCB
+};
+
+// bionic invokes the callback; the callback is guest code and needs the guest
+// TCB back for its duration.
+int phdr_bridge(struct dl_phdr_info* info, size_t size, void* v) {
+    PhdrBridge* b = (PhdrBridge*)v;
+    tp_set(b->guest_tp);
+    int r = b->fn(info, size, b->data);
+    tp_set(b->bionic_tp);   // bionic keeps iterating and holds its loader lock
+    return r;
+}
+
+} // namespace
+
+int guest_dl_iterate_phdr(int (*callback)(struct dl_phdr_info*, size_t, void*), void* data) {
+    void* tp = tp_get();
+    fo2::GuestTcb* tcb = (fo2::GuestTcb*)tp;
+    const bool on_guest_tcb = tp != nullptr && tcb->tcb == tp &&
+                              tcb->reserved[0] == fo2::kTcbMagic && tcb->bionic_tp != nullptr;
+
+    // 1) The guest image — the only module whose frames guest exceptions cross.
+    if (fo2::g_guest.phnum > 0 && !fo2::g_guest.phdrs.empty()) {
+        struct dl_phdr_info guest_info{};
+        guest_info.dlpi_addr = (ElfW(Addr))fo2::g_guest.slide_delta;
+        guest_info.dlpi_name = "fo2.aarch64";
+        guest_info.dlpi_phdr = fo2::g_guest.phdrs.data();
+        guest_info.dlpi_phnum = (ElfW(Half))fo2::g_guest.phnum;
+        int r = callback(&guest_info, sizeof(guest_info), data);
+        if (r != 0) return r;
+    }
+
+    // 2) The host's own modules (harmless; helps foreign unwinders).
+    {
+        BionicGuard g;
+        if (on_guest_tcb) {
+            PhdrBridge bridge{callback, data, tp, tcb->bionic_tp};
+            return dl_iterate_phdr(phdr_bridge, &bridge);
+        }
+        return dl_iterate_phdr(callback, data);
+    }
 }
 
 // ---- copy_file_range: raw syscall (bionic wrapper exists only on API 34+) ------
