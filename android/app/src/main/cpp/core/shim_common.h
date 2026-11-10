@@ -9,6 +9,7 @@
 // every shim that calls into bionic switches TPIDR to the thread's real bionic TCB first.
 #pragma once
 
+#include <cstdarg>
 #include <cstddef>
 #include <cstdint>
 
@@ -65,8 +66,18 @@ constexpr uint64_t kTcbMagic = 0x464F324755455354ULL; // "FO2GUEST"
 constexpr int kOffBionicTp = 0xC0;
 
 // Logging with the FO2 tag: adb logcat -s FO2
+// logi/loge also mirror every line into runtime.log (see set_runtime_log_path).
 void logi(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 void loge(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+
+// --- runtime.log: synchronous file log the tester can pull over USB --------------
+// Written under <external files dir>/runtime.log (truncated at each start).
+// Survives a process death, unlike the last lines of the in-app logcat capture.
+void set_runtime_log_path(const char* path);      // nullptr/empty = file logging off
+const char* runtime_log_path();
+void file_log_v(const char* fmt, va_list ap);
+void file_log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+void file_log_line_raw(const char* line);          // crash path: open/write only
 
 // --- guest symbol resolution -------------------------------------------------
 // Symbol classes are owned by the generated header shim/auto_imports.h
@@ -77,11 +88,19 @@ void loge(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 void* find_guest_symbol(const char* name);
 
 // --- flat guest address space -------------------------------------------------
-// GuestMemory (inside the guest) reserves 64 GiB of host address space and
-// requires it to land at the EXACT base 0x100000000: the recompiled game
-// hardcodes (0x100000000 | guest_va) in every memory access. Prepares the span
-// before the guest starts (drops unused reservations, reports real blockers).
+// GuestMemory inside the guest (disassembly-confirmed in fo2.aarch64 v1.0.0)
+// calls mmap(addr = 0x1000000000, len = 4 GiB, PROT_NONE, PRIVATE|ANON|NORESERVE)
+// and requires the kernel to return EXACTLY 0x1000000000: the recompiled game
+// hardcodes (0x1000000000 | guest_va) in every memory access. Prepares the span
+// before the guest starts and HOLDS a PROT_NONE reservation there so nothing
+// else can take it (guest_mmap in the shim recognizes the reservation as ours,
+// drops it and hands the exact span to the guest).
 void flat_memory_prepare();
+
+// Reservation bookkeeping shared with the guest_mmap shim (glibc_shim_manual.cpp).
+uint64_t flat_reserved_start();   // 0 = no reservation held
+uint64_t flat_reserved_end();
+void flat_clear_reservation();
 
 // --- lifecycle ---------------------------------------------------------------
 // Loads the guest ELF and starts it on a fresh guest thread. Returns false on failure.

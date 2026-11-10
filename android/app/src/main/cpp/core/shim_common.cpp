@@ -9,7 +9,10 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <pthread.h>
 #include <sys/mman.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "../shim/auto_imports.h"
 
@@ -17,11 +20,22 @@ namespace fo2 {
 
 // ---- flat guest window (GuestMemory inside the guest) --------------------------
 
-// The guest's GuestMemory ctor does: mmap(hint 0x100000000, 64 GiB, PROT_NONE,
-// PRIVATE|ANON|NORESERVE) and throws unless the kernel returns EXACTLY
-// 0x100000000 — recompiled code hardcodes (0x100000000 | guest_va) everywhere.
-constexpr uint64_t kFlatBase = 0x100000000ull;   // 4 GiB
-constexpr uint64_t kFlatSpan = 0x1000000000ull;  // 64 GiB
+// The guest's GuestMemory ctor (confirmed by disassembly of fo2.aarch64 v1.0.0,
+// GuestMemory::GuestMemory @ 0x13489d0) does:
+//   mmap(addr = 0x1000000000 (64 GiB), len = 0x100000000 (4 GiB), PROT_NONE,
+//        MAP_PRIVATE|ANON|NORESERVE)
+// and throws unless the kernel returns EXACTLY 0x1000000000 — recompiled code
+// hardcodes (0x1000000000 | guest_va) in every memory access.
+constexpr uint64_t kFlatBase = 0x1000000000ull;  // 64 GiB
+constexpr uint64_t kFlatSpan = 0x100000000ull;   // 4 GiB
+
+// Reservation held between flat_memory_prepare() and the guest's own hinted
+// mmap, so nothing else (Adreno/ANGLE, ART) can take the span in between.
+static uint64_t g_flat_reserved_start = 0, g_flat_reserved_end = 0;
+
+uint64_t flat_reserved_start() { return g_flat_reserved_start; }
+uint64_t flat_reserved_end()   { return g_flat_reserved_end; }
+void flat_clear_reservation() { g_flat_reserved_start = g_flat_reserved_end = 0; }
 
 bool read_self_maps(std::vector<SelfMapsEntry>* out) {
     FILE* f = fopen("/proc/self/maps", "re");
@@ -97,8 +111,13 @@ void flat_memory_prepare() {
                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE,
                    -1, 0);
     if (p != MAP_FAILED) {
-        munmap(p, kFlatSpan);   // free again: the guest's own hinted mmap must take it
-        logi("flat guest window 0x%" PRIx64 "-0x%" PRIx64 " is free",
+        // KEEP the reservation: guest_mmap (shim) will recognize it as ours,
+        // drop it and hand the exact span to the guest. Keeping it closed until
+        // then stops anything else (Adreno/ANGLE, ART) from mapping into the
+        // span between here and the guest's own hinted mmap.
+        g_flat_reserved_start = kFlatBase;
+        g_flat_reserved_end = kFlatBase + kFlatSpan;
+        logi("flat guest window reserved for the guest at 0x%" PRIx64 "-0x%" PRIx64,
              kFlatBase, kFlatBase + kFlatSpan);
         return;
     }
@@ -114,8 +133,9 @@ void flat_memory_prepare() {
                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE,
                  -1, 0);
         if (p != MAP_FAILED) {
-            munmap(p, kFlatSpan);
-            logi("flat guest window free after dropping gap reservations");
+            g_flat_reserved_start = kFlatBase;
+            g_flat_reserved_end = kFlatBase + kFlatSpan;
+            logi("flat guest window reserved after dropping gap reservations");
             return;
         }
         loge("flat guest window still taken after dropping gaps (errno %d)", errno);
@@ -125,10 +145,56 @@ void flat_memory_prepare() {
     // guest actually asks; nothing else we can safely do from here.
 }
 
+// ---- runtime.log: synchronous file mirror the user can pull over USB ------------
+// The in-app logcat capture the tester uses can lose the last lines right when
+// the process dies; this file is written line-by-line with fflush and survives.
+static pthread_mutex_t g_file_mu = PTHREAD_MUTEX_INITIALIZER;
+static FILE* g_log_file = nullptr;
+static std::string g_log_path;
+
+void set_runtime_log_path(const char* path) {
+    pthread_mutex_lock(&g_file_mu);
+    if (g_log_file) { fclose(g_log_file); g_log_file = nullptr; }
+    g_log_path = path ? path : "";
+    if (!g_log_path.empty()) g_log_file = fopen(g_log_path.c_str(), "w");
+    pthread_mutex_unlock(&g_file_mu);
+}
+
+const char* runtime_log_path() { return g_log_path.c_str(); }
+
+void file_log_v(const char* fmt, va_list ap) {
+    pthread_mutex_lock(&g_file_mu);
+    if (g_log_file) {
+        vfprintf(g_log_file, fmt, ap);
+        fputc('\n', g_log_file);
+        fflush(g_log_file);
+    }
+    pthread_mutex_unlock(&g_file_mu);
+}
+
+void file_log(const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    file_log_v(fmt, ap);
+    va_end(ap);
+}
+
+// Crash path: no FILE*/mutex (possible deadlock if the crash happened while the
+// log mutex was held) — raw open/write instead, async-signal-safe.
+void file_log_line_raw(const char* line) {
+    if (g_log_path.empty()) return;
+    int fd = open(g_log_path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) return;
+    (void)!write(fd, line, strlen(line));
+    (void)!write(fd, "\n", 1);
+    close(fd);
+}
+
 void logi(const char* fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     __android_log_vprint(ANDROID_LOG_INFO, "FO2", fmt, ap);
+    file_log_v(fmt, ap);
     va_end(ap);
 }
 
@@ -136,6 +202,7 @@ void loge(const char* fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     __android_log_vprint(ANDROID_LOG_ERROR, "FO2", fmt, ap);
+    file_log_v(fmt, ap);
     va_end(ap);
 }
 
