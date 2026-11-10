@@ -3,6 +3,8 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <elf.h>
+#include <vector>
 
 namespace fo2 {
 
@@ -14,6 +16,10 @@ struct GuestImage {
     uint64_t end_vaddr = 0;
     uint64_t slide_delta = 0;    // how far the image moved from the link-time base
                                  // (0 = loaded at 0x1000000; > 0 = slid to a free hole)
+
+    // Link-time program headers (NOT rebased): dl_iterate_phdr reports them with
+    // dlpi_addr = slide_delta so the guest unwinder computes real addresses.
+    std::vector<Elf64_Phdr> phdrs;
 
     // TLS segment initial image (PT_TLS), already zero-extended to memsz.
     uint8_t* tls_image = nullptr;

@@ -12,7 +12,30 @@
 #include <cstddef>
 #include <cstdint>
 
+#include <string>
+#include <vector>
+
 namespace fo2 {
+
+// --- /proc/self/maps helpers (shared by the ELF loader and the flat-window shims) ---
+
+struct SelfMapsEntry {
+    uint64_t start = 0, end = 0;
+    std::string perms;              // e.g. "rw-p" or "---p"
+    std::string path;               // empty for plain anonymous mappings
+    unsigned long long inode = 0;
+};
+
+bool read_self_maps(std::vector<SelfMapsEntry>* out);
+
+// Logs every mapping that overlaps [start, end), prefixed with `why`.
+void log_overlapping_maps(uint64_t start, uint64_t end, const char* why);
+
+// Unmaps every mapping overlapping [start, end) that is an unused reservation
+// (PROT_NONE, anonymous, unnamed). Dropping those cannot break anything that
+// already runs — they only exist to reserve address space. Returns how many
+// were dropped.
+int drop_pure_gap_maps(uint64_t start, uint64_t end);
 
 // Guest thread TCB: glibc aarch64 layout (tcbhead_t) followed by our private metadata.
 // The exe's TLS block sits immediately BEFORE this struct (tp-relative negative offsets).
@@ -52,6 +75,13 @@ void loge(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 // Returns the address to write into the guest GOT for `name`, or nullptr.
 // Order: static table (auto_imports.cpp) -> dlsym(DlSym class) -> weak -> error.
 void* find_guest_symbol(const char* name);
+
+// --- flat guest address space -------------------------------------------------
+// GuestMemory (inside the guest) reserves 64 GiB of host address space and
+// requires it to land at the EXACT base 0x100000000: the recompiled game
+// hardcodes (0x100000000 | guest_va) in every memory access. Prepares the span
+// before the guest starts (drops unused reservations, reports real blockers).
+void flat_memory_prepare();
 
 // --- lifecycle ---------------------------------------------------------------
 // Loads the guest ELF and starts it on a fresh guest thread. Returns false on failure.

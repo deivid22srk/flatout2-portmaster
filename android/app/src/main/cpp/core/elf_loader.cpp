@@ -47,72 +47,6 @@
 namespace fo2 {
 
 namespace {
-
-// One line of /proc/self/maps.
-struct MapsEntry {
-    uint64_t start = 0, end = 0;
-    std::string perms;   // e.g. "rw-p" or "---p"
-    std::string path;    // may be empty (plain anonymous)
-    unsigned long long inode = 0;
-};
-
-bool read_maps(std::vector<MapsEntry>* out) {
-    FILE* f = fopen("/proc/self/maps", "re");
-    if (f == nullptr) return false;
-    char line[1024];
-    while (fgets(line, sizeof(line), f) != nullptr) {
-        uint64_t s = 0, e = 0;
-        char perms[8] = {0};
-        unsigned long long off = 0, ino = 0;
-        unsigned int devmaj = 0, devmin = 0;
-        int consumed = 0;
-        if (sscanf(line, "%" SCNx64 "-%" SCNx64 " %7s %llx %x:%x %llu %n",
-                   &s, &e, perms, &off, &devmaj, &devmin, &ino, &consumed) < 7) {
-            continue;
-        }
-        MapsEntry m;
-        m.start = s;
-        m.end = e;
-        m.perms = perms;
-        m.inode = ino;
-        const char* p = line + consumed;
-        while (*p == ' ' || *p == '\t') ++p;
-        char* nl = strchr(line, '\n');   // strip the trailing newline, if any
-        if (nl != nullptr) *nl = '\0';
-        m.path = p;
-        out->push_back(std::move(m));
-    }
-    fclose(f);
-    return !out->empty();
-}
-
-void log_overlapping(uint64_t start, uint64_t end) {
-    std::vector<MapsEntry> maps;
-    if (!read_maps(&maps)) {
-        loge("cannot read /proc/self/maps to diagnose the clash");
-        return;
-    }
-    int shown = 0;
-    for (const auto& m : maps) {
-        if (m.start < end && start < m.end) {
-            loge("overlap: 0x%" PRIx64 "-0x%" PRIx64 " %s inode=%llu %s",
-                 m.start, m.end, m.perms.c_str(), m.inode,
-                 m.path.empty() ? "(anonymous)" : m.path.c_str());
-            if (++shown >= 8) {
-                loge("overlap: ... more suppressed");
-                break;
-            }
-        }
-    }
-}
-
-// True when an overlapping mapping is an unused gap reservation: anonymous,
-// unnamed and with no access rights at all. Dropping those cannot break the
-// runtime — they exist only to reserve address space.
-bool is_pure_gap(const MapsEntry& m) {
-    return m.perms == "---p" && m.inode == 0 && m.path.empty();
-}
-
 bool map_at(uint64_t vaddr, size_t len, int prot) {
     void* p = mmap((void*)(uintptr_t)vaddr, len, prot,
                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
@@ -126,7 +60,7 @@ bool map_at(uint64_t vaddr, size_t len, int prot) {
 
 // Lowest 64 KiB-aligned hole of at least `span` bytes inside [lo, hi), from
 // the snapshot in `maps`. Returns 0 when nothing fits.
-uint64_t find_free_hole(const std::vector<MapsEntry>& maps, uint64_t span,
+uint64_t find_free_hole(const std::vector<SelfMapsEntry>& maps, uint64_t span,
                         uint64_t lo, uint64_t hi) {
     if (hi <= lo || hi - lo < span) return 0;
     std::vector<std::pair<uint64_t, uint64_t>> used;
@@ -217,17 +151,18 @@ bool elf_load(const char* path, GuestImage& img) {
     } else {
         loge("link-time span 0x%" PRIx64 "-0x%" PRIx64 " is taken; diagnosing",
              span_start, span_start + span_len);
-        log_overlapping(span_start, span_start + span_len);
+        log_overlapping_maps(span_start, span_start + span_len, "guest image");
 
         // 2nd try: drop pure PROT_NONE gap reservations and retry in place.
-        std::vector<MapsEntry> maps;
+        std::vector<SelfMapsEntry> maps;
         bool reclaimed = false;
-        if (read_maps(&maps)) {
+        if (read_self_maps(&maps)) {
             bool all_gaps = true;
             std::vector<std::pair<uint64_t, uint64_t>> drops;
             for (const auto& m : maps) {
                 if (m.start < span_start + span_len && span_start < m.end) {
-                    if (is_pure_gap(m)) {
+                    bool gap = m.perms == "---p" && m.inode == 0 && m.path.empty();
+                    if (gap) {
                         drops.emplace_back(std::max(m.start, span_start),
                                            std::min(m.end, span_start + span_len));
                     } else {
@@ -250,9 +185,9 @@ bool elf_load(const char* path, GuestImage& img) {
             logi("guest image at link-time base after gap reclaim 0x%" PRIx64, span_start);
         } else {
             // 3rd try: slide the image into the lowest free hole we can find.
-            std::vector<MapsEntry> fresh;
+            std::vector<SelfMapsEntry> fresh;
             uint64_t cand = 0;
-            if (read_maps(&fresh)) {
+            if (read_self_maps(&fresh)) {
                 cand = find_free_hole(fresh, span_len, 0x1000000, 0x80000000ull);
                 if (cand == 0) cand = find_free_hole(fresh, span_len, 0x80000000ull, 0x100000000ull);
             }
@@ -417,6 +352,7 @@ bool elf_load(const char* path, GuestImage& img) {
     img.base_vaddr = min_va + delta;
     img.end_vaddr = max_va + delta;
     img.slide_delta = delta;
+    img.phdrs.assign(phdrs.begin(), phdrs.end());  // link-time values (NOT rebased)
     for (const auto& ph : phdrs) {
         if (ph.p_type == PT_PHDR) { img.phdr_vaddr = ph.p_vaddr + delta; img.phnum = ph.p_filesz / sizeof(Elf64_Phdr); }
     }
