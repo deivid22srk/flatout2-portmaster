@@ -9,6 +9,10 @@
         android:allowBackup="false"
         android:hardwareAccelerated="true"
         android:hasFragileUserData="false"
+        <!-- Interpreted Java only: skips the ART JIT code-cache mapping, which on
+             some devices lands in the low 4 GiB the guest image wants. The Java
+             side is a thin shell, so there is nothing to lose. -->
+        android:vmSafeMode="true"
         android:theme="@style/FO2Theme">
 
         <!-- File checker / instructions / entry point -->
