@@ -11,8 +11,8 @@ android {
         applicationId = "com.deivid22srk.flatout2"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.0.0-android.2"
+        versionCode = 3
+        versionName = "1.0.0-android.3"
 
         ndk {
             // FlatOut 2 recompiled is an AArch64-only binary.

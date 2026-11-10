@@ -133,6 +133,31 @@ thread própria → SDL shim renderiza na Surface e injeta eventos.
 - Mapeamento do hóspede em 0x1000000: pode falhar por reservas do zygote/ART que variam
   por fabricante — tratado pelo carregador (ver item acima); falhas restantes produzem
   log claro (`overlap: ...`) apontando o mapeamento culpado.
+- **Segundo aparelho real (o mesmo Motorola, APK android.2): "Falha ao iniciar o hóspede"
+  logo após `SDL_CreateWindow 640x480` — SIGABRT com pc dentro da libc.** Duas causas
+  confirmadas por disassembly do `fo2.aarch64` (não stripped: `testGuestMemory`, chamado
+  pelo `main` logo após a janela, e `GuestMemory::GuestMemory`):
+  1. **Janela plana de memória**: o jogo recompilado acessa a memória do hóspede como
+     `0x100000000 | guest_va` (constante embutida no código). `GuestMemory` reserva
+     `mmap(dica 0x100000000, 64 GiB, PROT_NONE, PRIVATE|ANON|NORESERVE)` e **exige** que
+     o kernel devolva exatamente 0x100000000 — lança "Guest address space could not be
+     reserved at the fixed base" caso contrário. No Android o kernel ignora a dica quando
+     qualquer mapeamento ocupa a faixa, e a exceção escapa (`std::terminate` → `abort`).
+     **Correção (v1.0.0-android.3):** antes do guest, sondamos a faixa com
+     `MAP_FIXED_NOREPLACE` (registrando qualquer bloqueio real), desfazemos reservas
+     inúteis (`---p` anônimas) e o shim `mmap` do hóspede força o posicionamento na
+     requisição exata do `GuestMemory`, repetindo a mesma estratégia.
+  2. **Exceções C++ do hóspede não desenrolavam**: o unwinder estático (libc++abi) do
+     binário localiza os FDEs via `dl_iterate_phdr`, que reencaminhávamos direto ao
+     bionic — que não conhece a imagem mapeada em-processo. O primeiro `throw` do hóspede
+     (inclusive o teste de unwinding dentro de `testGuestMemory`) terminava em
+     `std::terminate` → `abort()`. **Correção:** `dl_iterate_phdr` é agora um shim que
+     reporta a imagem do hóspede primeiro (`dlpi_addr = delta do deslize` sobre os phdrs
+     de link-time, então `dlpi_addr + p_vaddr` é o endereço real) e depois os módulos do
+     hospedeiro, com ponte que devolve o TPIDR do guest ao callback (o bionic segura o
+     lock do loader durante a iteração).
+  O handler de crash também passou a resolver pc/LR e ponteiros da pilha por módulo
+  (`nome.so+0xoff`) no log, para os próximos diagnósticos.
 - FMVs: desligados por padrão (sem FFmpeg no APK). Pode ser habilitado depois com libs FFmpeg
   bionic carregadas via shim `dlopen` (nomes `.so.NN` mapeados).
 - LAN/multiplayer: já não funciona no upstream; segue igual.
