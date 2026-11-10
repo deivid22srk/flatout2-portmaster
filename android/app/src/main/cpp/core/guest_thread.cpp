@@ -265,6 +265,10 @@ bool guest_start(const char* binPath, const char*, int, int, int) {
     pthread_mutex_unlock(&g_state_mu);
     if (already) return true;
 
+    // GuestMemory needs its 64 GiB window at the exact host base 0x100000000;
+    // free unused reservations there before anything else maps into the span.
+    flat_memory_prepare();
+
     if (!elf_load(binPath, g_guest)) return false;
 
     pthread_mutex_lock(&g_state_mu);
