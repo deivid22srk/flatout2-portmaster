@@ -1,0 +1,62 @@
+name: build
+
+# Builds the FlatOut 2 Android APK on every push to main, on PRs, and on demand.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Android SDK / NDK
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-34" "build-tools;34.0.0" \
+            "ndk;26.3.11579264" "cmake;3.22.1"
+
+      - name: Fetch guest binary from the upstream release
+        # fo2.aarch64 is NOT in this repository (no game-derived code is committed).
+        # The APK embeds it by downloading the public upstream release at build time.
+        run: |
+          curl -sL --retry 3 -o /tmp/fo2port.zip \
+            "https://github.com/badcats72/flatout2-portmaster/releases/download/v1.0.0/FlatOut2-ARM64-port.zip"
+          unzip -j -o /tmp/fo2port.zip "flatout2/fo2.aarch64" -d /tmp/fo2bin
+          mkdir -p android/app/src/main/assets/fo2
+          cp /tmp/fo2bin/fo2.aarch64 android/app/src/main/assets/fo2/fo2.aarch64
+          sha256sum android/app/src/main/assets/fo2/fo2.aarch64
+
+      - name: Build APKs (debug + release)
+        run: |
+          chmod +x android/gradlew
+          cd android
+          ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace
+
+      - name: Upload APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: flatout2-android-apk
+          path: |
+            android/app/build/outputs/apk/debug/*.apk
+            android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error

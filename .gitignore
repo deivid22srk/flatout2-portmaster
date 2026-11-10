@@ -14,18 +14,20 @@ d3dx9_30.dll
 *.bfs
 gamedata/
 
-# Artwork taken from the game (EmulationStation images)
-port/*.png
-port/images/
+# Android build outputs
+android/.gradle/
+android/build/
+android/app/build/
+android/.cxx/
+android/local.properties
+# The guest binary is fetched at build time (CI) or placed manually by the user:
+android/app/src/main/assets/fo2/fo2.aarch64
 
-# Ready-to-play folders hold the game's files
-dist/
+# Auxiliary downloads (commercial content never goes into the repository)
+fla2.rar
+fla2.zip
+Savegame/
 
-# Logs and dumps from the device
+# Misc
 *.log
-log*.txt
-mem*.txt
-*.pam
-*.ppm
-shadercache/
-shaderdump/
+.DS_Store
