@@ -105,18 +105,33 @@ void* guest_aligned_alloc(size_t align, size_t size) {
     return memalign(align, size);
 }
 
-// ---- mmap: the flat guest address space must land at exactly 0x100000000 -------
+// ---- _Exit: the guest's fatal paths (fo2::terminate etc.) end here -------------
 //
-// GuestMemory (inside the guest) reserves 64 GiB of host address space and
-// FAILS unless the kernel returns the EXACT base 0x100000000: the recompiled
-// game hardcodes (0x100000000 | guest_va) in every memory access. Its mmap is
-// only a HINT (no MAP_FIXED), so on Android — where the JVM maps its heaps
-// anywhere — the kernel silently picks another address and the game aborts in
-// testGuestMemory right after the window is created. Intercept that exact
-// request and force the placement whenever the span can be freed.
+// On Linux those paths print the real reason to stdout/stderr first; on Android
+// both are silent (no console), so an unexplained _Exit here used to mean the
+// app just "closes" with no log line at all. Flush and log before the process
+// vanishes, then exit like the guest asked (cannot return).
+void guest__Exit(int code) {
+    BionicGuard g;
+    fflush(nullptr);                       // drain stdout/stderr buffers into the pipe
+    logi("guest _Exit(%d) — the reason, if any, is in the output above", code);
+    usleep(150000);                        // let the output reader log what was flushed
+    _Exit(code);
+}
+
+// ---- mmap: the flat guest address space must land at exactly 0x1000000000 ------
+//
+// GuestMemory (inside the guest, disassembly-confirmed) reserves 4 GiB of host
+// address space with mmap(addr = 0x1000000000, len = 0x100000000, PROT_NONE,
+// PRIVATE|ANON|NORESERVE) and FAILS unless the kernel returns the EXACT base
+// 0x1000000000: the recompiled game hardcodes (0x1000000000 | guest_va) in
+// every memory access. Its mmap is only a HINT (no MAP_FIXED), so on Android —
+// where the JVM and the GPU driver map anywhere — the kernel may silently pick
+// another address and the game aborts in testGuestMemory right after the
+// window is created. Intercept that exact request and force the placement.
 void* guest_mmap(void* addr, size_t len, int prot, int flags, int fd, off_t off) {
-    constexpr uint64_t kFlatBase = 0x100000000ull;   // 4 GiB
-    constexpr uint64_t kFlatSpan = 0x1000000000ull;  // 64 GiB
+    constexpr uint64_t kFlatBase = 0x1000000000ull;  // 64 GiB
+    constexpr uint64_t kFlatSpan = 0x100000000ull;   // 4 GiB
 
     const bool flat_request = (uint64_t)(uintptr_t)addr == kFlatBase && len == kFlatSpan &&
                               prot == PROT_NONE && fd == -1 &&
@@ -130,11 +145,19 @@ void* guest_mmap(void* addr, size_t len, int prot, int flags, int fd, off_t off)
 
     static std::atomic<bool> reported{false};
     for (int attempt = 0; attempt < 2; ++attempt) {
+        // If our own reservation covers the span, drop it first: MAP_FIXED_NOREPLACE
+        // fails (EEXIST) even against a PROT_NONE anonymous mapping.
+        if (fo2::flat_reserved_start() == kFlatBase &&
+            fo2::flat_reserved_end() == kFlatBase + kFlatSpan) {
+            munmap((void*)(uintptr_t)kFlatBase, kFlatSpan);
+            fo2::flat_clear_reservation();
+            logi("handed our flat-window reservation to the guest");
+        }
         void* p = mmap((void*)(uintptr_t)kFlatBase, len, PROT_NONE,
                        flags | MAP_FIXED_NOREPLACE, fd, off);
         if (p != MAP_FAILED) {
             if (!reported.exchange(true))
-                logi("flat guest window reserved at 0x100000000 (64 GiB)");
+                logi("flat guest window reserved at 0x1000000000 (4 GiB)");
             return p;
         }
         if (errno != EEXIST) break;

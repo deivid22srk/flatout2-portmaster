@@ -59,10 +59,16 @@ MANUAL = {
     # (static libc++abi/libunwind) finds its .eh_frame only through it, and bionic
     # knows nothing about the image we map in-process.
     "dl_iterate_phdr",
-    # mmap: GuestMemory reserves 64 GiB and requires the EXACT base 0x100000000
-    # (recompiled code hardcodes 0x100000000 | guest_va in every memory access);
-    # a hinted mmap is not honored when Android's JVM mappings cover the span.
+    # mmap: GuestMemory (disassembly-confirmed) calls
+    # mmap(addr = 0x1000000000, len = 4 GiB, PROT_NONE, PRIVATE|ANON|NORESERVE)
+    # and requires the EXACT base 0x1000000000 (recompiled code hardcodes
+    # 0x1000000000 | guest_va in every memory access); a hinted mmap is not
+    # honored when Android's JVM/GPU mappings cover the span.
     "mmap",
+    # _Exit: the guest's fatal-error paths (fo2::terminate and friends) print to
+    # stdout/stderr and then call _Exit — log it before the process disappears,
+    # otherwise Android builds die with no trace in the logcat.
+    "_Exit",
 }
 
 # Weak undefined imports: resolve to NULL (same as on glibc consoles).
@@ -76,7 +82,7 @@ PURE = {
     "memchr", "strchr", "strcmp", "strcpy", "strncmp", "strrchr", "strstr",
     "acos", "asin", "atan2", "cosh", "sinh", "tanh", "pow", "powf",
     "frexp", "ldexp", "modf", "lround", "lroundf",
-    "_Exit", "nanosleep", "usleep", "clock_gettime", "time", "timegm",
+    "nanosleep", "usleep", "clock_gettime", "time", "timegm",
     "gmtime_r", "localtime_r", "getpid", "sched_yield", "sysconf", "getenv",
     "read", "write", "open", "close", "lseek", "pread", "pwrite", "dup",
     "unlink", "unlinkat", "link", "symlink", "readlink", "mkdir", "rmdir",

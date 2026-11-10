@@ -50,6 +50,7 @@ void sdl_SDL_Quit();
 void sdl_SDL_RWFromFile();
 void sdl_SDL_WasInit();
 void sdl_SDL_free();
+void guest__Exit();
 void guest___ctype_b_loc();
 void fo2_thunk___ctype_get_mb_cur_max();
 void guest___ctype_tolower_loc();
@@ -263,7 +264,7 @@ static const ImportEntry kImports[] = {
     {"SDL_RWFromFile", SymKind::Sdl, (void*)&sdl_SDL_RWFromFile},
     {"SDL_WasInit", SymKind::Sdl, (void*)&sdl_SDL_WasInit},
     {"SDL_free", SymKind::Sdl, (void*)&sdl_SDL_free},
-    {"_Exit", SymKind::DlSym, nullptr},
+    {"_Exit", SymKind::Manual, (void*)&guest__Exit},
     {"_ZTH19g_glesDeferBufferGL", SymKind::Weak0, nullptr},
     {"_ZTH20g_glesDeferTextureGL", SymKind::Weak0, nullptr},
     {"__ctype_b_loc", SymKind::Manual, (void*)&guest___ctype_b_loc},
