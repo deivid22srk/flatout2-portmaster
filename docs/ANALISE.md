@@ -158,6 +158,37 @@ thread própria → SDL shim renderiza na Surface e injeta eventos.
      lock do loader durante a iteração).
   O handler de crash também passou a resolver pc/LR e ponteiros da pilha por módulo
   (`nome.so+0xoff`) no log, para os próximos diagnósticos.
+- **Terceiro aparelho real (o mesmo Motorola, APK android.3): o app ainda fecha ao
+  tocar em iniciar, logo após `SDL_CreateWindow 640x480`, sem nenhuma linha FO2 a
+  mais.** Disassembly do `fo2.aarch64` v1.0.0 (`GuestMemory::GuestMemory` @
+  0x13489d0, `testGuestMemory` @ 0x134d560, chamado pelo `main` @ 0x1349990) revelou
+  três falhas da v android.3, corrigidas no **android.4**:
+  1. **Padrão do `mmap` invertido no shim**: o binário real pede
+     `mmap(addr = 0x1000000000 (64 GiB), len = 0x100000000 (4 GiB), PROT_NONE,
+     PRIVATE|ANON|NORESERVE)` e exige o retorno exato `0x1000000000`; o shim
+     `guest_mmap` esperava o oposto (`addr 0x100000000`, `len` 64 GiB), de modo
+     que o "fix" android.3 nunca casava com a requisição real — e
+     `flat_memory_prepare` sondava a faixa errada (4–68 GiB em vez de 64–68 GiB)
+     e ainda a desfazia (janela de corrida). Corrigido: valores reais, e a
+     reserva PROT_NONE fica mantida até o `mmap` do hóspede a reivindicar
+     (`munmap` da reserva própria + `MAP_FIXED_NOREPLACE`).
+  2. **stdout/stderr do hóspede invisíveis**: num APK release os fds 1/2 vão para
+     `/dev/null`, então TODAS as mensagens `[NFSU2]` do jogo (incluindo a razão
+     real nos caminhos de erro `fo2::terminate`/`as2::terminateProcess`, que
+     imprimem e chamam `_Exit`) desapareciam — o app "fechava" sem dizer por quê.
+     Corrigido: um pipe + thread leitora devolve essas linhas ao logcat sob a tag
+     FO2 e ao arquivo `runtime.log`.
+  3. **`_Exit` silencioso**: importado do guest e resolvido por dlsym direto, o
+     processo terminava sem registrar nada. Corrigido: shim que faz `fflush`,
+     registra `guest _Exit(N)` e só então termina; o handler de crash agora
+     cobre também SIGTRAP/SIGFPE, e todo o log FO2 é espelhado de forma síncrona
+     em `Android/data/com.deivid22srk.flatout2/files/runtime.log`, que sobrevive
+     à morte do processo (a captura do testador perdia justamente as últimas
+     linhas).
+  O fluxo esperado agora, no logcat/runtime.log: `flat guest window reserved for
+  the guest at 0x1000000000-0x1100000000` → `handed our flat-window reservation to
+  the guest` → `flat guest window reserved at 0x1000000000 (4 GiB)` → as linhas
+  `[NFSU2]` do jogo; uma falha real agora imprime a razão.
 - FMVs: desligados por padrão (sem FFmpeg no APK). Pode ser habilitado depois com libs FFmpeg
   bionic carregadas via shim `dlopen` (nomes `.so.NN` mapeados).
 - LAN/multiplayer: já não funciona no upstream; segue igual.
