@@ -38,7 +38,6 @@ FOTHUNK fo2_thunk_abort, abort
 FOTHUNK fo2_thunk_btowc, btowc
 FOTHUNK fo2_thunk_calloc, calloc
 FOTHUNK fo2_thunk_closedir, closedir
-FOTHUNK fo2_thunk_dl_iterate_phdr, dl_iterate_phdr
 FOTHUNK fo2_thunk_dladdr, dladdr
 FOTHUNK fo2_thunk_dlsym, dlsym
 FOTHUNK fo2_thunk_fchmod, fchmod

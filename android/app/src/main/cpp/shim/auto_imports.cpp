@@ -75,7 +75,7 @@ void guest_catgets();
 void guest_catopen();
 void fo2_thunk_closedir();
 void guest_copy_file_range();
-void fo2_thunk_dl_iterate_phdr();
+void guest_dl_iterate_phdr();
 void fo2_thunk_dladdr();
 void guest_dlopen();
 void fo2_thunk_dlsym();
@@ -124,6 +124,7 @@ void fo2_thunk_mbrtowc();
 void fo2_thunk_mbsnrtowcs();
 void fo2_thunk_mbsrtowcs();
 void fo2_thunk_mbtowc();
+void guest_mmap();
 void fo2_thunk_newlocale();
 void fo2_thunk_openat();
 void fo2_thunk_opendir();
@@ -304,7 +305,7 @@ static const ImportEntry kImports[] = {
     {"connect", SymKind::DlSym, nullptr},
     {"copy_file_range", SymKind::Manual, (void*)&guest_copy_file_range},
     {"cosh", SymKind::DlSym, nullptr},
-    {"dl_iterate_phdr", SymKind::Thunk, (void*)&fo2_thunk_dl_iterate_phdr},
+    {"dl_iterate_phdr", SymKind::Manual, (void*)&guest_dl_iterate_phdr},
     {"dladdr", SymKind::Thunk, (void*)&fo2_thunk_dladdr},
     {"dlopen", SymKind::Manual, (void*)&guest_dlopen},
     {"dlsym", SymKind::Thunk, (void*)&fo2_thunk_dlsym},
@@ -459,7 +460,7 @@ static const ImportEntry kImports[] = {
     {"mbtowc", SymKind::Thunk, (void*)&fo2_thunk_mbtowc},
     {"memchr", SymKind::DlSym, nullptr},
     {"mkdir", SymKind::DlSym, nullptr},
-    {"mmap", SymKind::DlSym, nullptr},
+    {"mmap", SymKind::Manual, (void*)&guest_mmap},
     {"modf", SymKind::DlSym, nullptr},
     {"mprotect", SymKind::DlSym, nullptr},
     {"munmap", SymKind::DlSym, nullptr},

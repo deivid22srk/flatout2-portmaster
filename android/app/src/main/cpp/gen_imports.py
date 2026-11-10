@@ -55,6 +55,14 @@ MANUAL = {
     "catopen", "catgets", "catclose",     # absent in bionic: stubs
     "__libc_current_sigrtmin",            # constant
     "__libc_single_threaded",             # data char (glibc 2.32+)
+    # dl_iterate_phdr must also report the guest image: the guest's C++ unwinder
+    # (static libc++abi/libunwind) finds its .eh_frame only through it, and bionic
+    # knows nothing about the image we map in-process.
+    "dl_iterate_phdr",
+    # mmap: GuestMemory reserves 64 GiB and requires the EXACT base 0x100000000
+    # (recompiled code hardcodes 0x100000000 | guest_va in every memory access);
+    # a hinted mmap is not honored when Android's JVM mappings cover the span.
+    "mmap",
 }
 
 # Weak undefined imports: resolve to NULL (same as on glibc consoles).
@@ -73,7 +81,7 @@ PURE = {
     "read", "write", "open", "close", "lseek", "pread", "pwrite", "dup",
     "unlink", "unlinkat", "link", "symlink", "readlink", "mkdir", "rmdir",
     "chdir", "access", "truncate", "fcntl", "fsync", "ftruncate",
-    "mmap", "mprotect", "munmap", "madvise",
+    "mprotect", "munmap", "madvise",
     "sendfile", "poll", "socket", "connect", "bind", "listen", "accept4",
     "send", "recv", "sendto", "recvfrom", "getsockname", "getpeername",
     "getsockopt", "setsockopt", "shutdown", "inet_ntop",
